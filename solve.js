@@ -9,10 +9,6 @@ function split(text) {
   return { parts, n, noNl };
 }
 
-function lineStr(t, i) {
-  return t.parts[i];
-}
-
 function written(op, t, i) {
   return i === t.n - 1 && t.noNl ? op + t.parts[i] + '\n%\n' : op + t.parts[i] + '\n';
 }
@@ -26,23 +22,26 @@ export function run(input) {
   const n = A.n;
   const m = B.n;
   const ids = new Map();
-  const intern = (t) => {
-    const r = new Int32Array(t.n);
-    const p = t.parts;
-    const lastNo = t.noNl ? t.n - 1 : -1;
-    for (let i = 0; i < t.n; i++) {
-      const key = i === lastNo ? p[i] + '\n' : p[i];
-      let id = ids.get(key);
-      if (id === undefined) {
-        id = ids.size;
-        ids.set(key, id);
-      }
-      r[i] = id;
+  const a = new Int32Array(n);
+  const ap = A.parts;
+  const aLastNo = A.noNl ? n - 1 : -1;
+  for (let i = 0; i < n; i++) {
+    const key = i === aLastNo ? ap[i] + '\n' : ap[i];
+    let id = ids.get(key);
+    if (id === undefined) {
+      id = ids.size;
+      ids.set(key, id);
     }
-    return r;
-  };
-  const a = intern(A);
-  const b = intern(B);
+    a[i] = id;
+  }
+  const b = new Int32Array(m);
+  const bp = B.parts;
+  const bLastNo = B.noNl ? m - 1 : -1;
+  for (let i = 0; i < m; i++) {
+    const key = i === bLastNo ? bp[i] + '\n' : bp[i];
+    const id = ids.get(key);
+    b[i] = id === undefined ? -1 : id;
+  }
 
   let prefix = 0;
   while (prefix < n && prefix < m && a[prefix] === b[prefix]) prefix++;
@@ -56,82 +55,126 @@ export function run(input) {
   let deleted = 0;
   let inserted = 0;
 
-  if (N > 0 || M > 0) {
+  if (N === 0) {
+    if (M > 0) {
+      ch.push(prefix, prefix, 0, M);
+      inserted = M;
+    }
+  } else if (M === 0) {
+    ch.push(prefix, prefix, N, 0);
+    deleted = N;
+  } else {
     const ao = prefix;
     const off = N + M + 1;
     const V = new Int32Array(2 * (N + M) + 3).fill(-1);
-    const T = [];
-    let x = 0;
-    while (x < N && x < M && a[ao + x] === b[ao + x]) x++;
-    V[off] = x;
-    T.push(Int32Array.of(x));
+    const traceLimit = Math.min(8191, N + M);
+    const trace = new Uint8Array(Math.ceil((traceLimit + 1) * (traceLimit + 2) / 16));
+    V[off] = 0;
     let D = 0;
     let endK = 0;
-    if (!(x >= N && x >= M)) {
-      outer: for (let d = 1; ; d++) {
-        const Td = new Int32Array(d + 1);
-        for (let k = -d, idx = 0; k <= d; k += 2, idx++) {
-          const xr = V[off + k - 1];
-          const xa = V[off + k + 1];
+    outer: for (let d = 1; ; d++) {
+      const traceRow = d * (d + 1) / 2;
+      for (let k = -d, idx = 0, vi = off - d; k <= d; k += 2, idx++, vi += 2) {
+        const xr = V[vi - 1];
+        const xa = V[vi + 1];
+        const canR = xr >= 0 && xr < N;
+        const canA = xa >= 0 && xa - k - 1 < M;
+        if (!canR && !canA) {
+          V[vi] = -1;
+          continue;
+        }
+        let px;
+        if (canR && (!canA || xr + 1 >= xa)) {
+          px = xr + 1;
+        } else {
+          px = xa;
+          if (d <= traceLimit) {
+            const bit = traceRow + idx;
+            trace[bit >> 3] |= 1 << (bit & 7);
+          }
+        }
+        let y = px - k;
+        while (px < N && y < M && a[ao + px] === b[ao + y]) {
+          px++;
+          y++;
+        }
+        V[vi] = px;
+        if (px >= N && y >= M) {
+          D = d;
+          endK = k;
+          break outer;
+        }
+      }
+    }
+
+    // Recover predecessor choices. Large edit distances are recomputed in fixed-size
+    // blocks so the retained trace never grows quadratically.
+    const ops = new Uint8Array(D + 1); // 1 = deletion, 2 = insertion
+    let k = endK;
+    let target = D;
+    const BLOCK = 2048;
+    while (target > traceLimit) {
+      const start = Math.max(traceLimit, target - BLOCK);
+      const firstBit = (start + 1) * (start + 2) / 2;
+      const lastBit = (target + 1) * (target + 2) / 2;
+      const blockTrace = new Uint8Array(Math.ceil((lastBit - firstBit) / 8));
+      const W = new Int32Array(V.length).fill(-1);
+      W[off] = 0;
+      for (let d = 1; d <= target; d++) {
+        const row = d * (d + 1) / 2;
+        for (let q = -d, idx = 0, vi = off - d; q <= d; q += 2, idx++, vi += 2) {
+          const xr = W[vi - 1];
+          const xa = W[vi + 1];
           const canR = xr >= 0 && xr < N;
-          const canA = xa >= 0 && xa - k - 1 < M;
+          const canA = xa >= 0 && xa - q - 1 < M;
           if (!canR && !canA) {
-            V[off + k] = -1;
-            Td[idx] = -1;
+            W[vi] = -1;
             continue;
           }
           let px;
-          if (canR && (!canA || xr + 1 >= xa)) px = xr + 1;
-          else px = xa;
-          let y = px - k;
+          if (canR && (!canA || xr + 1 >= xa)) {
+            px = xr + 1;
+          } else {
+            px = xa;
+            if (d > start) {
+              const bit = row + idx - firstBit;
+              blockTrace[bit >> 3] |= 1 << (bit & 7);
+            }
+          }
+          let y = px - q;
           while (px < N && y < M && a[ao + px] === b[ao + y]) {
             px++;
             y++;
           }
-          V[off + k] = px;
-          Td[idx] = px;
-          if (px >= N && y >= M) {
-            T.push(Td);
-            D = d;
-            endK = k;
-            break outer;
-          }
+          W[vi] = px;
+          if (d === target && q === k) break;
         }
-        T.push(Td);
       }
+      for (let d = target; d > start; d--) {
+        const bit = d * (d + 1) / 2 + ((k + d) >> 1) - firstBit;
+        if ((blockTrace[bit >> 3] & (1 << (bit & 7))) !== 0) {
+          ops[d] = 2;
+          k++;
+        } else {
+          ops[d] = 1;
+          k--;
+        }
+      }
+      target = start;
     }
-    // traceback
-    const ops = new Uint8Array(D + 1); // 1 = deletion, 2 = insertion
-    const snake = new Int32Array(D + 1);
-    let k = endK;
-    let xe = T[D][(k + D) >> 1];
-    for (let d = D; d >= 1; d--) {
-      const Tp = T[d - 1];
-      const kr = k - 1;
-      const ka = k + 1;
-      const xr = kr < -(d - 1) || kr > d - 1 ? -1 : Tp[(kr + d - 1) >> 1];
-      const xa = ka < -(d - 1) || ka > d - 1 ? -1 : Tp[(ka + d - 1) >> 1];
-      const canR = xr >= 0 && xr < N;
-      const canA = xa >= 0 && xa - k - 1 < M;
-      let start;
-      if (canR && (!canA || xr + 1 >= xa)) {
-        ops[d] = 1;
-        start = xr + 1;
-        snake[d] = xe - start;
-        k = kr;
-        xe = xr;
-      } else {
+    for (let d = target; d >= 1; d--) {
+      const bit = d * (d + 1) / 2 + ((k + d) >> 1);
+      if ((trace[bit >> 3] & (1 << (bit & 7))) !== 0) {
         ops[d] = 2;
-        start = xa;
-        snake[d] = xe - start;
-        k = ka;
-        xe = xa;
+        k++;
+      } else {
+        ops[d] = 1;
+        k--;
       }
     }
-    snake[0] = xe;
-    // forward
-    let o = prefix + snake[0];
-    let p = prefix + snake[0];
+    // Replay the chosen edits and maximal equal runs to form changes.
+    let o = prefix;
+    let p = prefix;
     let co = -1;
     let cp = 0;
     let cd = 0;
@@ -153,28 +196,32 @@ export function run(input) {
         p++;
         inserted++;
       }
-      const s = snake[d];
-      o += s;
-      p += s;
+      while (o < n - suffix && p < m - suffix && a[o] === b[p]) {
+        o++;
+        p++;
+      }
     }
     if (co >= 0) ch.push(co, cp, cd, ci);
   }
 
   const nc = ch.length >> 2;
-  // hunks as [startChange, endChange)
+  // hunks as flat [startChange, endChange] pairs
   const hs = [];
   for (let c = 0; c < nc; c++) {
     if (hs.length > 0) {
       const pc = c - 1;
       if (ch[c * 4] - (ch[pc * 4] + ch[pc * 4 + 2]) <= 2 * CONTEXT) {
-        hs[hs.length - 1][1] = c + 1;
+        hs[hs.length - 1] = c + 1;
         continue;
       }
     }
-    hs.push([c, c + 1]);
+    hs.push(c, c + 1);
   }
-  const out = [`makefun-diff/1 old=${n} new=${m} hunks=${hs.length} deleted=${deleted} inserted=${inserted}\n`];
-  for (const [s, e] of hs) {
+  const hunkCount = hs.length >> 1;
+  const out = [`makefun-diff/1 old=${n} new=${m} hunks=${hunkCount} deleted=${deleted} inserted=${inserted}\n`];
+  for (let hi = 0; hi < hs.length; hi += 2) {
+    const s = hs[hi];
+    const e = hs[hi + 1];
     const f = s * 4;
     const l = (e - 1) * 4;
     const oldStart = Math.max(0, ch[f] - CONTEXT);
